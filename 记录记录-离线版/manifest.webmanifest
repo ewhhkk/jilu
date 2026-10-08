@@ -1,0 +1,16 @@
+{
+  "name": "记录记录",
+  "short_name": "记录记录",
+  "description": "账单、预算、购物、项目和健身的个人记录",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#FFFCF8",
+  "theme_color": "#FFFCF8",
+  "icons": [
+    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}
