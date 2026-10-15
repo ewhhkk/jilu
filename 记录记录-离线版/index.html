@@ -94,6 +94,8 @@ button,input,select,textarea{font:inherit;color:inherit}
 .small{font-size:13px}
 .tiny{font-size:12px}
 .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.grid3 .tile .v{overflow-wrap:anywhere}
 .tile{background:var(--card);border-radius:12px;padding:12px;min-width:0;cursor:pointer;border:0;text-align:left;width:100%}
 .tile .k{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px}
 .tile .v{font-family:var(--num);font-size:20px;font-weight:500;font-variant-numeric:tabular-nums;margin-top:2px}
@@ -236,27 +238,41 @@ function money(a,c,dec){const v=Number(a)||0;const d=dec??(Math.abs(v)%1?2:0);re
 function m0(a){return money(Math.round(a),dispCur(),0)}
 function billType(k){return BILL_TYPES.find(b=>b.k===k)||BILL_TYPES[BILL_TYPES.length-1]}
 function alertDays(){return Number(S.settings.alertDays??6)}
-function budgetFor(m){const h=(S.settings.budgets||[]).filter(b=>b.from<=m).sort((a,b)=>a.from<b.from?1:-1);return h.length?conv(h[0].amount,h[0].cur||'CNY'):null}
-function monthBills(m){return S.bills.filter(b=>b.dueDate&&ym(b.dueDate)===m)}
+function pickBudget(list,m){const h=(list||[]).filter(b=>b.from<=m).sort((a,b)=>a.from<b.from?1:-1);return h.length?conv(h[0].amount,h[0].cur||'CNY'):null}
+function budgetFor(m){return pickBudget(S.settings.budgets,m)}
+function expBudgetFor(m){return pickBudget(S.settings.expBudgets,m)}
+/* a bill counts in the month its period ends; older bills only have dueDate */
+function bdate(b){return b.end||b.dueDate||b.start||''}
+function periodLabel(b){if(b.start&&b.end)return fmtD(b.start)+'–'+fmtD(b.end);const d=bdate(b);return d?fmtD(d):''}
+function monthBills(m){return S.bills.filter(b=>bdate(b)&&ym(bdate(b))===m)}
+function yearBills(y){return S.bills.filter(b=>bdate(b).startsWith(y))}
+function yearExp(y){return S.expenses.filter(e=>(e.date||'').startsWith(y))}
 function monthExp(m){return S.expenses.filter(e=>e.date&&ym(e.date)===m)}
 function sumConv(arr){return arr.reduce((s,x)=>s+conv(x.amount,x.currency),0)}
-function moneyFor(m){const bills=sumConv(monthBills(m)),exp=sumConv(monthExp(m)),budget=budgetFor(m);return {bills,exp,budget,left:budget==null?null:budget-bills-exp}}
+function moneyFor(m){const bills=sumConv(monthBills(m)),exp=sumConv(monthExp(m)),budget=budgetFor(m),expBudget=expBudgetFor(m);
+  return {bills,exp,budget,left:budget==null?null:budget-bills-exp,expBudget,expLeft:expBudget==null?null:expBudget-exp}}
 function projProgress(pid){const ts=S.tasks.filter(t=>t.projectId===pid);if(!ts.length)return null;const leaf=ts.filter(t=>!ts.some(c=>c.parentId===t.id));return leaf.filter(t=>t.status==='done').length/leaf.length}
 function proj(id){return S.projects.find(p=>p.id===id)}
 function company(id){return S.companies.find(c=>c.id===id)}
 const CYCLES=[['1','每月'],['2','每两个月'],['3','每季度'],['6','每半年'],['12','每年'],['0','不固定']];
 function cycleLabel(n){return (CYCLES.find(c=>c[0]===String(n))||[0,''])[1]}
 function dayIn(mm,day){const [y,mo]=mm.split('-').map(Number);return mm+'-'+pad(Math.min(day,new Date(y,mo,0).getDate()))}
-function coBills(co){return sorted(S.bills.filter(b=>b.companyId===co.id&&b.dueDate),b=>b.dueDate,true)}
-/* next date this company should be paid: an unpaid bill if one exists, else projected from the schedule */
+function coBills(co){return sorted(S.bills.filter(b=>b.companyId===co.id&&bdate(b)),bdate,true)}
+/* first scheduled payment day on or after a date */
+function schedOnOrAfter(co,ds){const day=Number(co.day);let m=ym(ds);let d=dayIn(m,day);if(d<ds){m=addMonths(m,1);d=dayIn(m,day)}return d}
+function schedNext(co,d){return dayIn(addMonths(ym(d),Number(co.cycle)),Number(co.day))}
+/* next payment for a company: {date, bill} — bill is the unpaid bill it belongs to, if one is recorded */
 function nextDue(co){const td=today();const bs=coBills(co);
-  const unpaid=bs.filter(b=>!b.paid).sort((a,b)=>a.dueDate<b.dueDate?-1:1)[0];if(unpaid)return {date:unpaid.dueDate,bill:unpaid};
-  const n=Number(co.cycle),day=Number(co.day);if(!n||!day)return null;
-  const last=bs[0];let m=last?ym(last.dueDate):ym(td);let d=dayIn(m,day);
-  let guard=0;while((last&&d<=last.dueDate)||d<td){m=addMonths(m,n);d=dayIn(m,day);if(++guard>60)break}
+  const unpaid=sorted(bs.filter(b=>!b.paid),bdate)[0]||null;
+  const n=Number(co.cycle),day=Number(co.day);
+  if(!n||!day)return unpaid?{date:null,bill:unpaid}:null;
+  if(unpaid)return {date:schedOnOrAfter(co,bdate(unpaid)),bill:unpaid};
+  const lastPaid=bs.find(b=>b.paid);let d;
+  if(lastPaid){d=schedNext(co,schedOnOrAfter(co,bdate(lastPaid)));let g=0;while(schedNext(co,d)<=td&&g++<60)d=schedNext(co,d)}
+  else d=schedOnOrAfter(co,td);
   return {date:d,bill:null};}
-/* scheduled payments with no bill recorded yet, as reminder items */
-function scheduleDues(){return S.companies.map(co=>{const nd=nextDue(co);return nd&&!nd.bill?{co,date:nd.date}:null}).filter(Boolean)}
+/* reminders: every company with a scheduled date (with or without a recorded bill) */
+function scheduleDues(){return S.companies.map(co=>{const nd=nextDue(co);return nd&&nd.date?{co,date:nd.date,bill:nd.bill}:null}).filter(Boolean)}
 function sorted(a,f,desc){return [...a].sort((x,y)=>{const A=f(x)??'',B=f(y)??'';return (A<B?-1:A>B?1:0)*(desc?-1:1)})}
 
 /* ---------- storage ---------- */
@@ -374,7 +390,7 @@ async function aiShop(name){
 async function aiBill(text){
   if(!sample)throw {code:'off'};
   const r=await sample.json(`从下面这段账单文字（短信、邮件或 app 通知）里提取信息，回复 JSON：
-{"type": 只能是 ${BILL_TYPES.map(b=>b.k).join('/')} 之一, "company": 公司名或 null, "amount": 数字或 null, "currency": ISO 代码如 "CNY"/"AUD" 或 null, "dueDate": "YYYY-MM-DD" 或 null（今天是 ${today()}，没写年份就按最近的未来日期）, "usage": 用量数字或 null（电的度数、水的吨数、燃气的立方数）, "method": 缴费方式或 null}
+{"type": 只能是 ${BILL_TYPES.map(b=>b.k).join('/')} 之一, "company": 公司名或 null, "amount": 数字或 null, "currency": ISO 代码如 "CNY"/"AUD" 或 null, "start": 账单周期开始 "YYYY-MM-DD" 或 null, "end": 账单周期结束 "YYYY-MM-DD" 或 null（今天是 ${today()}，没写年份就按最近的日期）, "usage": 用量数字或 null（电的度数、水的吨数、燃气的立方数）, "method": 缴费方式或 null}
 只回复 JSON。
 
 账单文字：
@@ -392,8 +408,7 @@ async function ensureRecurring(){
     if(r.paused||(r.from&&r.from>m))continue;
     const id=`r-${r.id}-${m}`;
     if(S.bills.some(b=>b.id===id))continue;
-    const day=Math.min(Number(r.day)||1,28);
-    await safe(()=>put('bills',id,{type:r.type,companyId:r.companyId||'',amount:Number(r.amount)||0,currency:r.currency||mainCur(),dueDate:`${m}-${pad(day)}`,method:r.method||'',paid:false,recurringId:r.id,usage:null,note:''}));
+    await safe(()=>put('bills',id,{type:r.type,companyId:r.companyId||'',amount:Number(r.amount)||0,currency:r.currency||mainCur(),start:`${m}-01`,end:dayIn(m,31),method:r.method||'',paid:false,recurringId:r.id,usage:null,note:''}));
   }
 }
 
@@ -402,7 +417,6 @@ function calEvents(){
   const ev={};const add=(d,k,item)=>{if(!d)return;(ev[d]=ev[d]||{p:[],b:[],w:[]})[k].push(item)};
   S.tasks.forEach(t=>{if(t.deadline)add(t.deadline,'p',{kind:'task',t})});
   S.projects.forEach(p=>{if(p.deadline)add(p.deadline,'p',{kind:'proj',p})});
-  S.bills.forEach(b=>{if(b.dueDate)add(b.dueDate,'b',b)});
   S.workouts.forEach(w=>{if(w.date)add(w.date,'w',w)});
   scheduleDues().forEach(x=>add(x.date,'b',{sched:x}));
   return ev;
@@ -419,22 +433,23 @@ function calendarHTML(m,sel,ev,actPrefix='cal'){
 
 /* ---------- rows ---------- */
 function billRow(b,showDate=true){
-  const t=billType(b.type);const c=company(b.companyId);const days=daysBetween(today(),b.dueDate||today());
-  const due=!b.paid&&b.dueDate&&days<=alertDays();
-  const st=b.paid?`<span class="chip green">已缴</span>`:days<0?`<span class="chip red">逾期 ${-days} 天</span>`:days===0?`<span class="chip red">今天到期</span>`:due?`<span class="chip red">${days} 天后到期</span>`:`<span class="chip">未缴</span>`;
-  const usage=b.usage?` · ${b.usage}${t.unit||''}`:'';
-  return `<div class="row ${due?'alert':''}" data-act="editBill" data-id="${b.id}" role="button" tabindex="0">
-    <div class="ico ${due?'red':''}">${icon(t.ic)}</div>
+  const t=billType(b.type);const c=company(b.companyId);
+  const st=b.paid?`<span class="chip green">已缴</span>`:`<span class="chip">未缴</span>`;
+  const usage=b.usage?` · ${b.usage}${t.unit||''}`:'';const per=showDate?periodLabel(b):'';
+  return `<div class="row" data-act="editBill" data-id="${b.id}" role="button" tabindex="0">
+    <div class="ico">${icon(t.ic)}</div>
     <div class="grow"><div class="t">${esc(b.type)}${c?` <span class="small muted">${esc(c.name)}</span>`:''}</div>
-    <div class="s">${showDate&&b.dueDate?fmtD(b.dueDate)+' · ':''}${st}${usage}${b.recurringId?' · <span class="tiny">每月固定</span>':''}</div></div>
+    <div class="s">${per?per+' · ':''}${st}${b.method?' · '+esc(b.method):''}${usage}${b.recurringId?' · <span class="tiny">每月固定</span>':''}</div></div>
     <div class="amt">${money(b.amount,b.currency)}</div>
     ${b.paid?'':`<button class="chk" data-act="payBill" data-id="${b.id}" aria-label="标记已缴"></button>`}</div>`;
 }
 function dueRow(x){const t=billType(x.co.type);const days=daysBetween(today(),x.date);const near=days<=alertDays();
+  const chip=`<span class="chip ${near?'red':''}">${days<0?`已过 ${-days} 天`:days===0?'今天该交':`${days} 天后该交`}</span>`;
+  const b=x.bill;
   return `<div class="row ${near?'alert':''}"><div class="ico ${near?'red':''}">${icon(t.ic)}</div>
-  <div class="grow"><div class="t">${esc(x.co.type)} <span class="small muted">${esc(x.co.name)}</span></div>
-  <div class="s">${fmtD(x.date)} · <span class="chip ${near?'red':''}">${days<0?`已过 ${-days} 天`:days===0?'今天该交':`${days} 天后该交`}</span> · ${cycleLabel(x.co.cycle)}</div></div>
-  <button class="btn ghost" data-act="billFromCo" data-id="${x.co.id}" data-d="${x.date}" style="padding:6px 10px;font-size:13px">记账单</button></div>`}
+  <div class="grow" ${b?`data-act="editBill" data-id="${b.id}" role="button" tabindex="0"`:''}><div class="t">${esc(x.co.type)} <span class="small muted">${esc(x.co.name)}</span></div>
+  <div class="s">${fmtD(x.date)} · ${chip}${b?` · ${money(b.amount,b.currency)} 未缴`:` · ${cycleLabel(x.co.cycle)}`}</div></div>
+  ${b?`<button class="btn ghost" data-act="payBill" data-id="${b.id}" style="padding:6px 10px;font-size:13px">已缴</button>`:`<button class="btn ghost" data-act="billFromCo" data-id="${x.co.id}" style="padding:6px 10px;font-size:13px">记账单</button>`}</div>`}
 function taskRow(t,opts={}){
   const p=proj(t.projectId);const subs=S.tasks.filter(x=>x.parentId===t.id);const dd=t.deadline?daysBetween(today(),t.deadline):null;
   const ddChip=t.deadline&&t.status!=='done'?`<span class="chip ${dd<0?'red':dd<=2?'gold':''}">${dd<0?'逾期':dd===0?'今天截止':fmtD(t.deadline)}</span>`:'';
@@ -477,8 +492,6 @@ function header(title,en,extra=''){
 /* ---------- HOME ---------- */
 function viewHome(){
   const ev=calEvents();const m=UI.calMonth;const [y,mo]=m.split('-');const td=today();
-  const dueBills=S.bills.filter(b=>!b.paid&&b.dueDate&&daysBetween(td,b.dueDate)<=alertDays());
-  dueBills.sort((a,b)=>a.dueDate<b.dueDate?-1:1);
   const dueSched=scheduleDues().filter(x=>daysBetween(td,x.date)<=alertDays()).sort((a,b)=>a.date<b.date?-1:1);
   const todayTasks=S.tasks.filter(t=>t.status!=='done'&&(t.today===td||t.deadline===td));
   const urgentShop=S.shop.filter(s=>s.status==='todo'&&(s.urgency===3||(s.buyBy&&daysBetween(td,s.buyBy)<=2)));
@@ -486,24 +499,23 @@ function viewHome(){
   const sel=UI.selDay;const se=ev[sel];
   let h=header(`${+mo}月`,`${y} · CALENDAR`,`<div class="monthnav"><button class="iconbtn" data-act="calPrev" aria-label="上个月">${icon('chevron_left')}</button><button class="iconbtn" data-act="calNext" aria-label="下个月">${icon('chevron_right')}</button></div>`);
   h+=calendarHTML(m,sel,ev);
-  h+=`<div class="legend"><span><i style="background:var(--a)"></i>项目</span><span><i style="background:var(--red)"></i>账单到期</span><span><i style="background:var(--green)"></i>健身</span>${m!==ym(td)?`<button class="link" data-act="calToday">回到今天</button>`:''}</div>`;
+  h+=`<div class="legend"><span><i style="background:var(--a)"></i>项目</span><span><i style="background:var(--red)"></i>缴费日</span><span><i style="background:var(--green)"></i>健身</span>${m!==ym(td)?`<button class="link" data-act="calToday">回到今天</button>`:''}</div>`;
 
   // selected day / today
   const isToday=sel===td;
   h+=`<section class="sec panel"><div class="sech"><h2>${isToday?'今天':fmtD(sel)}<small>${fmtD(sel)} 周${wdName(sel)}</small></h2><button class="link" data-act="quickAdd">${icon('add','style="font-size:18px"')}添加</button></div>`;
   let items='';
   if(isToday){
-    dueBills.forEach(b=>items+=billRow(b));
     dueSched.forEach(x=>items+=dueRow(x));
     todayTasks.forEach(t=>items+=taskRow(t,{showProj:true}));
     urgentShop.forEach(s=>items+=shopRow(s));
     (se?.w||[]).forEach(w=>items+=wkRow(w));
   }else if(se){
-    se.b.forEach(b=>items+=b.sched?dueRow(b.sched):billRow(b,false));
+    se.b.forEach(b=>items+=dueRow(b.sched));
     se.p.forEach(x=>items+=x.kind==='task'?taskRow(x.t,{showProj:true}):`<div class="row" data-act="openProj" data-id="${x.p.id}" role="button" tabindex="0"><div class="ico">${icon('star')}</div><div class="grow"><div class="t">${esc(x.p.name)}</div><div class="s">项目截止</div></div></div>`);
     se.w.forEach(w=>items+=wkRow(w));
   }
-  h+=items||empty(isToday?'today':'calendar_month',isToday?'今天没有到期账单和待办。点"添加"记一笔，或者去项目里把任务放进今天。':'这天没有安排。');
+  h+=items||empty(isToday?'today':'calendar_month',isToday?'今天没有要交的账单和待办。点"添加"记一笔，或者去项目里把任务放进今天。':'这天没有安排。');
   h+='</section>';
 
   const lb=S.settings.lastBackup;const hasData=S.expenses.length+S.bills.length+S.tasks.length+S.shop.length>20;
@@ -514,11 +526,7 @@ function viewHome(){
   const lastW=sorted(S.weights,w=>w.date,true)[0];const goal=S.settings.goalWeight;
   const activeProj=S.projects.filter(p=>!p.archived);
   h+=`<section class="sec"><div class="sech"><h2>本月概览<small>OVERVIEW</small></h2></div>`;
-  if(mf.budget!=null){const pct=Math.max(0,Math.min(100,(mf.bills+mf.exp)/mf.budget*100));
-    h+=`<button class="tile hero ${mf.left<0?'over':''}" data-act="goTab" data-tab="money" style="color:inherit"><div class="small" style="display:flex;justify-content:space-between"><span>${mf.left<0?'本月已超支':'本月还能花'}</span><span>预算 ${m0(mf.budget)}</span></div>
-    <div class="big">${m0(Math.abs(mf.left))}</div><div class="bar" style="margin-top:8px"><i style="width:${pct}%"></i></div>
-    <div class="tiny" style="margin-top:6px">账单 ${m0(mf.bills)} · 日常 ${m0(mf.exp)}</div></button>`;
-  }else h+=`<button class="tile hero" data-act="budget" style="color:inherit"><div class="small">还没设每月预算</div><div style="font-size:16px;margin-top:2px">设一个预算，就能看到每月还能花多少 ${icon('arrow_forward','style="font-size:18px"')}</div></button>`;
+  h+=budgetCards(mf,true);
   h+=`<div class="grid2" style="margin-top:8px">
     <button class="tile" data-act="goTab" data-tab="shop"><div class="k">${icon('shopping_bag','style="font-size:16px"')}购物</div><div class="v">${todo.length} 件</div><div class="tiny muted">预计 ${m0(est)}</div></button>
     <button class="tile" data-act="goTab" data-tab="fit"><div class="k">${icon('fitness_center','style="font-size:16px"')}本周运动</div><div class="v">${wkMin} 分钟</div><div class="tiny muted">${lastW?`体重 ${lastW.value} 斤${goal?` · 还差 ${Math.max(0,+(lastW.value-goal).toFixed(1))} 斤`:''}`:'还没记体重'}</div></button></div>`;
@@ -544,69 +552,88 @@ function monthNav(m,act){const [y,mo]=m.split('-');return `<div style="display:f
 function catTotals(m){const t={};monthExp(m).forEach(e=>{const k=ecat(e)[0];t[k]=(t[k]||0)+conv(e.amount,e.currency)});return t}
 function subTotals(m){const t={};monthExp(m).forEach(e=>{const [k,s]=ecat(e);t[k]=t[k]||{};t[k][s||'未细分']=(t[k][s||'未细分']||0)+conv(e.amount,e.currency)});return t}
 function rawByCur(m){const t={};[...monthBills(m),...monthExp(m)].forEach(x=>{const c=x.currency||mainCur();t[c]=(t[c]||0)+(Number(x.amount)||0)});return t}
+/* the two budget cards; compact = home page version (taps open 圆子) */
+function budgetCards(mf,compact){
+  const card=(label,budget,left,lines,kind)=>{const used=budget-left;const pct=Math.max(0,Math.min(100,used/budget*100));const over=left<0;
+    const tag=compact?`button class="tile hero ${over?'over':''}" data-act="goTab" data-tab="money" style="color:inherit;margin-top:8px"`:`div class="hero ${over?'over':''}" style="margin-top:8px"`;
+    return `<${tag}><div class="small" style="display:flex;justify-content:space-between;gap:8px"><span>${label} · ${over?'已超支':'还能花'}</span>${compact?`<span>${m0(budget)}</span>`:`<button class="link" data-act="budget" data-k="${kind}" style="color:inherit;padding:0">${m0(budget)} ${icon('edit','style="font-size:14px"')}</button>`}</div>
+    <div class="big" ${compact&&kind==='exp'&&mf.budget!=null?'style="font-size:24px"':''}>${m0(Math.abs(left))}</div><div class="bar" style="margin-top:8px"><i style="width:${pct}%"></i></div>
+    <div class="tiny" style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap">${lines}</div></${tag.split(' ')[0]}>`};
+  let h='';
+  if(mf.budget!=null)h+=card('总预算',mf.budget,mf.left,`<span>预算 ${m0(mf.budget)}</span><span>− 账单 ${m0(mf.bills)}</span><span>− 支出 ${m0(mf.exp)}</span>`,'total');
+  if(mf.expBudget!=null)h+=card('可支配支出预算',mf.expBudget,mf.expLeft,`<span>预算 ${m0(mf.expBudget)}</span><span>− 支出 ${m0(mf.exp)}</span>`,'exp');
+  if(mf.budget==null&&mf.expBudget==null)h+=`<button class="tile hero" data-act="budget" style="margin-top:8px;color:inherit"><div class="small">还没设每月预算</div><div style="font-size:15px;margin-top:2px">可以设总预算（账单 + 支出）和可支配支出预算 ${icon('arrow_forward','style="font-size:16px"')}</div></button>`;
+  else if(!compact&&(mf.budget==null||mf.expBudget==null))h+=`<button class="link small" data-act="budget" data-k="${mf.budget==null?'total':'exp'}" style="margin-top:4px">${icon('add','style="font-size:16px"')}设置${mf.budget==null?'总预算':'可支配支出预算'}</button>`;
+  return h;
+}
+function totalsGrid(m){const y=m.slice(0,4);const mf=moneyFor(m);const yb=sumConv(yearBills(y)),ye=sumConv(yearExp(y));
+  const cell=(k,v,strong)=>`<div class="tile" style="cursor:default;padding:10px"><div class="k">${k}</div><div class="v" style="font-size:${strong?18:16}px">${m0(v)}</div></div>`;
+  return `<div class="grid3" style="margin-top:8px">${cell('本月合计',mf.bills+mf.exp,1)}${cell('本月账单',mf.bills)}${cell('本月支出',mf.exp)}</div>
+  <div class="grid3" style="margin-top:8px">${cell(y+' 年度合计',yb+ye,1)}${cell(y+' 年度账单',yb)}${cell(y+' 年度支出',ye)}</div>`}
+function trendBars(m,fn,color){const months=[...Array(6)].map((_,i)=>addMonths(m,i-5));const vals=months.map(mm=>({mm,v:fn(mm)}));const vmax=Math.max(1,...vals.map(x=>x.v));
+  return `<div class="vbars" style="height:100px">${vals.map(x=>`<div class="c ${x.mm===m?'cur':''}"><span class="tiny muted">${x.v?(x.v>=10000?Math.round(x.v/1000)+'k':Math.round(x.v)):''}</span><div class="stack" style="height:${x.v/vmax*80}%;background:${color}"></div><span class="lb">${+x.mm.slice(5)}月</span></div>`).join('')}</div>`}
+function diffTag(d){if(Math.round(d)===0)return '';return `<br><span class="tiny" style="color:${d>0?'var(--red)':'var(--green)'}">${d>0?'+':'−'}${m0(Math.abs(d))}</span>`}
 function moneyOverview(){
-  const m=UI.moneyMonth;const mf=moneyFor(m);
+  const m=UI.moneyMonth;const mf=moneyFor(m);const pm=addMonths(m,-1);
   let h=monthNav(m,'moneyMonth');
-  if(mf.budget!=null){const pct=Math.max(0,Math.min(100,(mf.bills+mf.exp)/mf.budget*100));
-    h+=`<div class="hero ${mf.left<0?'over':''}" style="margin-top:8px"><div class="small" style="display:flex;justify-content:space-between"><span>${mf.left<0?'已超支':'还能花'}</span><button class="link" data-act="budget" style="color:inherit;padding:0">预算 ${m0(mf.budget)} ${icon('edit','style="font-size:14px"')}</button></div>
-    <div class="big">${m0(Math.abs(mf.left))}</div><div class="bar" style="margin-top:8px"><i style="width:${pct}%"></i></div>
-    <div class="tiny" style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap"><span>预算 ${m0(mf.budget)}</span><span>− 固定账单 ${m0(mf.bills)}</span><span>− 日常 ${m0(mf.exp)}</span></div></div>`;
-  }else h+=`<button class="tile hero" data-act="budget" style="margin-top:8px;color:inherit"><div class="small">还没设每月预算</div><div>设好后这里会显示：预算 − 固定账单 − 日常花销 = 还能花多少</div></button>`;
-  h+=`<div class="grid2" style="margin-top:8px"><div class="tile" style="cursor:default"><div class="k">本月合计</div><div class="v">${m0(mf.bills+mf.exp)}</div></div><div class="tile" style="cursor:default"><div class="k">${m.slice(0,4)} 年度合计</div><div class="v">${m0(yearTotal(m.slice(0,4)))}</div></div></div>`;
+  h+=budgetCards(mf,false);
+  h+=totalsGrid(m);
   const raw=rawByCur(m);const curs=Object.keys(raw);
-  h+=`<div class="tiny muted" style="margin:8px 4px 0;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>${curs.length>1?'原币：'+curs.map(c=>money(raw[c],c,0)).join(' + ')+' · ':''}按 1 A$ = ¥${rateOf('AUD').toFixed(2)} 换算</span><button class="link tiny" data-act="settings" style="padding:0">改汇率</button></div>`;
-  // category breakdown
-  const ct=catTotals(m);const st=subTotals(m);const prev=catTotals(addMonths(m,-1));const bt={};monthBills(m).forEach(b=>bt[b.type]=(bt[b.type]||0)+conv(b.amount,b.currency));
-  const all=[...Object.entries(bt).map(([k,v])=>({k,v,bill:true})),...Object.entries(ct).map(([k,v])=>({k,v}))].sort((a,b)=>b.v-a.v);
-  const max=Math.max(1,...all.map(x=>x.v));
-  h+=`<section class="sec"><div class="sech"><h2>花在哪了<small>BY CATEGORY</small></h2></div><div class="panel">`;
-  h+=all.length?all.map(x=>{const d=x.bill?null:x.v-(prev[x.k]||0);
-    const subs=x.bill?'':Object.entries(st[x.k]||{}).sort((a,b)=>b[1]-a[1]).map(([s,v])=>`${esc(s)} ${m0(v)}`).join(' · ');
-    return `<div class="hbar"><span>${esc(x.k)}${x.bill?' <span class="tiny muted">账单</span>':''}</span><div class="track"><i style="width:${x.v/max*100}%;${x.bill?'background:var(--red)':''}"></i></div><span class="val">${m0(x.v)}${d!=null&&prev[x.k]!=null?`<br><span class="tiny" style="color:${d>0?'var(--red)':'var(--green)'}">${d>0?'+':''}${m0(d)}</span>`:''}</span>${subs?`<span></span><span class="tiny muted" style="grid-column:2/4;margin-top:-4px">${subs}</span>`:''}</div>`}).join(''):empty('payments','这个月还没有记录');
-  h+=`</div></section>`;
-  // trend
-  const months=[...Array(6)].map((_,i)=>addMonths(m,i-5));const vals=months.map(mm=>({mm,b:sumConv(monthBills(mm)),e:sumConv(monthExp(mm))}));const vmax=Math.max(1,...vals.map(v=>v.b+v.e));
-  h+=`<section class="sec"><div class="sech"><h2>月度趋势<small>6 MONTHS</small></h2><div class="legend" style="padding:0"><span><i style="background:var(--red)"></i>账单</span><span><i style="background:var(--a)"></i>日常</span></div></div><div class="panel"><div class="vbars">`+
-   vals.map(v=>`<div class="c ${v.mm===m?'cur':''}"><span class="tiny muted">${v.b+v.e?Math.round((v.b+v.e)/ (v.b+v.e>=10000?1000:1))+(v.b+v.e>=10000?'k':''):''}</span><div class="stack" style="height:${(v.b+v.e)/vmax*90}%"><i style="height:${v.b+v.e?v.b/(v.b+v.e)*100:0}%;background:var(--red)"></i><i style="height:${v.b+v.e?v.e/(v.b+v.e)*100:0}%;background:var(--a)"></i></div><span class="lb">${+v.mm.slice(5)}月</span></div>`).join('')+`</div></div></section>`;
+  h+=`<div class="tiny muted" style="margin:8px 4px 0;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>${curs.length>1?'原币：'+curs.map(c=>money(raw[c],c,0)).join(' + ')+' · ':''}按 1 A$ = ¥${rateOf('AUD').toFixed(2)} 换算 · 账单按结束日期算月份</span><button class="link tiny" data-act="settings" style="padding:0">改汇率</button></div>`;
+  // bills
+  const bt={},pbt={};monthBills(m).forEach(b=>bt[b.type]=(bt[b.type]||0)+conv(b.amount,b.currency));monthBills(pm).forEach(b=>pbt[b.type]=(pbt[b.type]||0)+conv(b.amount,b.currency));
+  const bl=Object.entries(bt).sort((a,b)=>b[1]-a[1]);const bmax=Math.max(1,...bl.map(x=>x[1]));
+  h+=`<section class="sec"><div class="sech"><h2>账单<small>BILLS</small></h2><span class="small" style="font-weight:500">${m0(mf.bills)}</span></div><div class="panel">`;
+  h+=bl.length?bl.map(([k,v])=>`<div class="hbar"><span>${esc(k)}</span><div class="track"><i style="width:${v/bmax*100}%;background:var(--red)"></i></div><span class="val">${m0(v)}${pbt[k]!=null?diffTag(v-pbt[k]):''}</span></div>`).join(''):empty('receipt_long','这个月还没有账单');
+  h+=`<div class="small muted" style="margin:14px 2px 0">近 6 个月</div>${trendBars(m,mm=>sumConv(monthBills(mm)),'var(--red)')}</div></section>`;
+  // spending
+  const ct=catTotals(m);const st=subTotals(m);const prev=catTotals(pm);
+  const el=Object.entries(ct).sort((a,b)=>b[1]-a[1]);const emax=Math.max(1,...el.map(x=>x[1]));
+  h+=`<section class="sec"><div class="sech"><h2>支出<small>SPENDING</small></h2><span class="small" style="font-weight:500">${m0(mf.exp)}</span></div><div class="panel">`;
+  h+=el.length?el.map(([k,v])=>{const subs=Object.entries(st[k]||{}).sort((a,b)=>b[1]-a[1]).map(([s2,v2])=>`${esc(s2)} ${m0(v2)}`).join(' · ');
+    return `<div class="hbar"><span>${esc(k)}</span><div class="track"><i style="width:${v/emax*100}%"></i></div><span class="val">${m0(v)}${prev[k]!=null?diffTag(v-prev[k]):''}</span>${subs?`<span></span><span class="tiny muted" style="grid-column:2/4;margin-top:-4px">${subs}</span>`:''}</div>`}).join(''):empty('payments','这个月还没有支出');
+  h+=`<div class="small muted" style="margin:14px 2px 0">近 6 个月</div>${trendBars(m,mm=>sumConv(monthExp(mm)),'var(--a)')}</div></section>`;
   // AI summary
   h+=`<section class="sec"><div class="sech"><h2>月度小结<small>SUMMARY</small></h2></div><div class="note">${esc(ruleSummary(m))}</div></section>`;
   return h;
 }
 function ruleSummary(m){
   const mf=moneyFor(m);const tot=mf.bills+mf.exp;if(!tot)return '这个月还没有记录。';
-  const [y,mo]=m.split('-');let out=`${+mo}月一共花了 ${m0(tot)}（固定账单 ${m0(mf.bills)}，日常 ${m0(mf.exp)}）`;
-  out+=mf.budget!=null?(mf.left>=0?`，比预算少 ${m0(mf.left)}。`:`，超出预算 ${m0(-mf.left)}。`):'。';
+  const [y,mo]=m.split('-');let out=`${+mo}月一共花了 ${m0(tot)}（账单 ${m0(mf.bills)}，支出 ${m0(mf.exp)}）`;
+  out+=mf.budget!=null?(mf.left>=0?`，比总预算少 ${m0(mf.left)}。`:`，超出总预算 ${m0(-mf.left)}。`):'。';
+  if(mf.expBudget!=null)out+=mf.expLeft>=0?`可支配支出预算还剩 ${m0(mf.expLeft)}。`:`可支配支出预算超了 ${m0(-mf.expLeft)}。`;
   const ct=catTotals(m),pt=catTotals(addMonths(m,-1));const hasPrev=Object.keys(pt).length>0;
   if(hasPrev){const ks=[...new Set([...Object.keys(ct),...Object.keys(pt)])];let best=null;
     ks.forEach(k=>{const d=(ct[k]||0)-(pt[k]||0);if(!best||Math.abs(d)>Math.abs(best.d))best={k,d}});
     if(best&&Math.abs(best.d)>=1)out+=`\n和上个月比，变化最大的是「${best.k}」，${best.d>0?'多':'少'}了 ${m0(Math.abs(best.d))}。`}
   const ents=Object.entries(ct).sort((a,b)=>b[1]-a[1]);
-  if(ents.length&&mf.exp>0){out+=`\n日常花销里「${ents[0][0]}」最多，占 ${Math.round(ents[0][1]/mf.exp*100)}%`;
+  if(ents.length&&mf.exp>0){out+=`\n支出里「${ents[0][0]}」最多，占 ${Math.round(ents[0][1]/mf.exp*100)}%`;
     const st=subTotals(m)[ents[0][0]]||{};const top=Object.entries(st).sort((a,b)=>b[1]-a[1])[0];
     out+=top&&top[0]!=='未细分'?`，其中「${top[0]}」${m0(top[1])}。`:'。'}
   const days=m===ym(today())?+today().slice(8):new Date(+y,+mo,0).getDate();
-  if(mf.exp>0)out+=`\n平均每天日常花 ${m0(mf.exp/days)}。`;
-  if(m===ym(today())&&mf.budget!=null&&mf.left>0){const left=new Date(+y,+mo,0).getDate()-days+1;out+=`本月还剩 ${left} 天，每天可以花 ${m0(mf.left/left)}。`}
+  if(mf.exp>0)out+=`\n平均每天支出 ${m0(mf.exp/days)}。`;
+  const room=mf.expLeft!=null?mf.expLeft:mf.left;
+  if(m===ym(today())&&room!=null&&room>0){const left=new Date(+y,+mo,0).getDate()-days+1;out+=`本月还剩 ${left} 天，每天可以花 ${m0(room/left)}。`}
   return out}
-function yearTotal(y){return sumConv(S.bills.filter(b=>b.dueDate&&b.dueDate.startsWith(y)))+sumConv(S.expenses.filter(e=>e.date&&e.date.startsWith(y)))}
+function yearTotal(y){return sumConv(yearBills(y))+sumConv(yearExp(y))}
 function moneyBills(){
   let h=`<div style="display:flex;gap:8px;margin-top:12px"><button class="btn" data-act="newBill">${icon('add','style="font-size:18px"')}记账单</button></div>`;
   h+=`<div class="pills" style="margin-top:12px"><button class="pill ${!UI.billFilter?'on':''}" data-act="billFilter" data-k="">按月</button>${BILL_TYPES.filter(t=>t.k!=='其他'||S.bills.some(b=>b.type==='其他')).map(t=>`<button class="pill ${UI.billFilter===t.k?'on':''}" data-act="billFilter" data-k="${t.k}">${t.k}</button>`).join('')}</div>`;
   if(!UI.billFilter){
     const m=UI.moneyMonth;h+=monthNav(m,'moneyMonth');
-    const bs=sorted(monthBills(m),b=>(b.paid?'1':'0')+b.dueDate);
+    const bs=sorted(monthBills(m),b=>(b.paid?'1':'0')+bdate(b));
     const unpaid=bs.filter(b=>!b.paid);
     h+=`<div class="grid2" style="margin:8px 0"><div class="tile" style="cursor:default"><div class="k">本月账单</div><div class="v">${m0(sumConv(bs))}</div></div><div class="tile" style="cursor:default"><div class="k">未缴</div><div class="v" style="color:${unpaid.length?'var(--red)':'inherit'}">${unpaid.length} 笔 · ${m0(sumConv(unpaid))}</div></div></div>`;
-    const sched=scheduleDues().filter(x=>ym(x.date)===m).sort((a,b)=>a.date<b.date?-1:1);
+    const sched=scheduleDues().filter(x=>!x.bill&&ym(x.date)===m).sort((a,b)=>a.date<b.date?-1:1);
     if(sched.length)h+=`<div class="small muted" style="margin:4px 4px 6px">按缴费时间，这个月还要交</div>${sched.map(dueRow).join('')}<div style="height:10px"></div>`;
     h+=bs.length?bs.map(b=>billRow(b)).join(''):sched.length?'':empty('receipt_long','这个月还没有账单。点"记账单"，或者把缴费短信粘贴进来让 AI 填。');
     if(S.recurring.length)h+=`<section class="sec"><div class="sech"><h2>每月固定<small>RECURRING</small></h2></div>${S.recurring.map(r=>`<div class="row"><div class="ico">${icon('autorenew')}</div><div class="grow"><div class="t">${esc(r.type)} ${company(r.companyId)?`<span class="small muted">${esc(company(r.companyId).name)}</span>`:''}</div><div class="s">每月 ${r.day} 号自动生成</div></div><div class="amt">${money(r.amount,r.currency)}</div><button class="iconbtn" data-act="delRecurring" data-id="${r.id}" aria-label="停止">${icon('close')}</button></div>`).join('')}</section>`;
   }else{
-    const t=billType(UI.billFilter);const bs=sorted(S.bills.filter(b=>b.type===UI.billFilter),b=>b.dueDate,true);
+    const t=billType(UI.billFilter);const bs=sorted(S.bills.filter(b=>b.type===UI.billFilter),bdate,true);
     const avg=bs.length?sumConv(bs)/bs.length:0;
     h+=`<div class="grid2" style="margin:12px 0 8px"><div class="tile" style="cursor:default"><div class="k">平均每笔</div><div class="v">${m0(avg)}</div></div><div class="tile" style="cursor:default"><div class="k">共 ${bs.length} 笔</div><div class="v">${m0(sumConv(bs))}</div></div></div>`;
     const withU=bs.filter(b=>b.usage).slice(0,8).reverse();
-    if(t.unit&&withU.length>1){const mx=Math.max(...withU.map(b=>b.usage));h+=`<div class="panel" style="margin-bottom:8px"><div class="small muted">用量（${t.unit}）</div><div class="vbars" style="height:100px">${withU.map(b=>`<div class="c"><span class="tiny muted">${b.usage}</span><div class="stack" style="height:${b.usage/mx*80}%;background:var(--a)"></div><span class="lb">${fmtD(b.dueDate).replace(/\d+日/,'')}</span></div>`).join('')}</div></div>`}
+    if(t.unit&&withU.length>1){const mx=Math.max(...withU.map(b=>b.usage));h+=`<div class="panel" style="margin-bottom:8px"><div class="small muted">用量（${t.unit}）</div><div class="vbars" style="height:100px">${withU.map(b=>`<div class="c"><span class="tiny muted">${b.usage}</span><div class="stack" style="height:${b.usage/mx*80}%;background:var(--a)"></div><span class="lb">${fmtD(bdate(b)).replace(/\d+日/,'')}</span></div>`).join('')}</div></div>`}
     h+=bs.length?bs.map(b=>billRow(b)).join(''):empty(t.ic,`还没有${t.k}记录`);
   }
   return h;
@@ -641,8 +668,8 @@ function moneyCo(){
     ${c.phone?`<div class="s">${icon('call','style="font-size:15px"')} <span style="user-select:all">${esc(c.phone)}</span></div>`:''}
     ${c.website?`<div class="s">${icon('language','style="font-size:15px"')} <a href="${/^https?:/.test(c.website)?esc(c.website):'https://'+esc(c.website)}" target="_blank" rel="noopener" style="color:var(--a3)" data-stop="1">${esc(c.website)}</a></div>`:''}
     ${(()=>{const nd=nextDue(c);const sch=Number(c.cycle)&&c.day?`${cycleLabel(c.cycle)} ${c.day} 号交`:c.cycle==='0'?'不固定':'';if(!sch&&!nd&&!c.whenNote)return '<div class="s">还没设缴费时间</div>';
-      const days=nd?daysBetween(today(),nd.date):null;
-      return `<div class="s" style="margin-top:4px">${icon('calendar_month','style="font-size:15px"')} ${sch}${c.whenNote?(sch?' · ':'')+esc(c.whenNote):''}</div>${nd?`<div class="s">下次：${fmtD(nd.date)} <span class="chip ${days<=alertDays()?'red':''}">${days<0?`已过 ${-days} 天`:days===0?'今天':`还有 ${days} 天`}</span>${nd.bill?' · 已有账单':''}</div>`:''}`})()}
+      const days=nd&&nd.date?daysBetween(today(),nd.date):null;
+      return `<div class="s" style="margin-top:4px">${icon('calendar_month','style="font-size:15px"')} ${sch}${c.whenNote?(sch?' · ':'')+esc(c.whenNote):''}</div>${nd&&nd.date?`<div class="s">下次：${fmtD(nd.date)} <span class="chip ${days<=alertDays()?'red':''}">${days<0?`已过 ${-days} 天`:days===0?'今天':`还有 ${days} 天`}</span>${nd.bill?' · 已记账单，未缴':''}</div>`:nd&&nd.bill?'<div class="s">有一笔未缴账单</div>':''}`})()}
     ${c.howToPay?`<div class="s" style="margin-top:4px;color:var(--fg)">${esc(c.howToPay)}</div>`:''}
     ${c.account?`<div class="s">户号备注：${esc(c.account)}</div>`:''}
     <div class="tiny muted" style="margin-top:4px">${n} 笔账单</div></div></div>`}).join(''):empty('store','还没有公司档案。比如：国家电网、自来水公司、你的宽带运营商。');
@@ -781,21 +808,24 @@ function opt(list,sel){return list.map(x=>{const [v,t]=Array.isArray(x)?x:[x,x];
 function curSel(id,sel){return `<select id="${id}">${opt(Object.keys(CURS).map(c=>[c,c+' '+CURS[c]]),sel||mainCur())}</select>`}
 
 function billSheet(b={},prefill){
-  const isNew=!b.id;const x={...b,...(prefill||{})};const t=billType(x.type||'电费');
+  const isNew=!b.id;const x={...b,...(prefill||{})};const t=billType(x.type||'电费');const m=ym(today());
+  const start=x.start??(isNew?`${m}-01`:'');const end=x.end||x.dueDate||(isNew?dayIn(m,31):'');
   return ()=>sheetHead(isNew?'记账单':'编辑账单',isNew?'':`<button class="iconbtn" data-act="delBill" data-id="${b.id}" aria-label="删除">${icon('delete')}</button>`)+
-  `${prefill?`<div class="chip a" style="margin-bottom:10px">${icon('auto_awesome','style="font-size:14px"')} AI 已填好，检查一下再保存</div>`:''}
+  `${prefill&&prefill.ai?`<div class="chip a" style="margin-bottom:10px">${icon('auto_awesome','style="font-size:14px"')} AI 已填好，检查一下再保存</div>`:''}
   <div class="field"><label for="bType">类型</label><select id="bType">${opt(BILL_TYPES.map(b=>b.k),x.type||'电费')}</select></div>
   <div class="field"><label for="bCo">公司</label><select id="bCo"><option value="">不选</option>${opt(S.companies.map(c=>[c.id,c.name+' · '+c.type]),x.companyId||'')}<option value="__new">+ 新公司…</option></select>
    <input id="bCoNew" placeholder="新公司名称" value="${esc(x.companyName||'')}" ${x.companyName?'':'hidden'}></div>
   <div class="frow"><div class="field"><label for="bAmt">金额</label><input id="bAmt" type="number" step="0.01" inputmode="decimal" value="${x.amount??''}"></div><div class="field"><label for="bCur">币种</label>${curSel('bCur',x.currency)}</div></div>
-  <div class="frow"><div class="field"><label for="bDue">到期日</label><input id="bDue" type="date" value="${x.dueDate||today()}"></div><div class="field"><label for="bMethod">缴费方式</label><select id="bMethod"><option value="">—</option>${opt(METHODS,x.method||'')}</select></div></div>
-  <div class="frow"><div class="field"><label for="bUsage">用量（可选）</label><input id="bUsage" type="number" step="0.1" inputmode="decimal" value="${x.usage??''}" placeholder="${t.unit||''}"></div>
+  <div class="frow"><div class="field"><label for="bStart">起始日期</label><input id="bStart" type="date" value="${start}"></div><div class="field"><label for="bEnd">结束日期</label><input id="bEnd" type="date" value="${end}"></div></div>
+  <div class="tiny muted" style="margin:-6px 2px 12px">这笔账单覆盖的时间段，按结束日期算进对应月份。</div>
+  <div class="frow"><div class="field"><label for="bMethod">缴费方式</label><select id="bMethod"><option value="">—</option>${opt(METHODS,x.method||'')}</select></div>
    <div class="field"><label for="bPaid">状态</label><select id="bPaid">${opt([['0','未缴'],['1','已缴']],x.paid?'1':'0')}</select></div></div>
+  <div class="field"><label for="bUsage">用量（可选）</label><input id="bUsage" type="number" step="0.1" inputmode="decimal" value="${x.usage??''}" placeholder="${t.unit||''}"></div>
   ${isNew?`<label class="small" style="display:flex;gap:8px;align-items:center;margin-bottom:12px"><input type="checkbox" id="bRec"> 每月固定这个金额，以后每月自动生成</label>`:''}
   <div class="field"><label for="bNote">备注</label><input id="bNote" value="${esc(x.note||'')}"></div>
   <button class="btn" style="width:100%;justify-content:center" data-act="saveBill" data-id="${b.id||''}">保存</button>`;
 }
-function pasteSheet(){return sheetHead('粘贴账单文字')+`<div class="small muted" style="margin-bottom:8px">把缴费短信、邮件或 app 通知的文字粘贴进来，AI 会识别类型、公司、金额、到期日和用量。</div>
+function pasteSheet(){return sheetHead('粘贴账单文字')+`<div class="small muted" style="margin-bottom:8px">把缴费短信、邮件或 app 通知的文字粘贴进来，AI 会识别类型、公司、金额、账单周期和用量。</div>
   <div class="field"><textarea id="pasteText" placeholder="【国网】您户号 ****1234 本期电费 186.40 元，用电 312 度，请于 10 月 11 日前缴纳…" style="min-height:140px"></textarea></div>
   <div id="pasteErr" class="small" style="color:var(--red);margin-bottom:8px"></div>
   <button class="btn" style="width:100%;justify-content:center" data-act="runPaste" id="pasteBtn">${icon('auto_awesome','style="font-size:18px"')}识别</button>`}
@@ -895,12 +925,16 @@ function wkSheet(w){return ()=>sheetHead('编辑运动',`<button class="iconbtn"
   <div class="frow"><div class="field"><label for="ewMin">分钟</label><input id="ewMin" type="number" value="${w.minutes||''}"></div><div class="field"><label for="ewDate">日期</label><input id="ewDate" type="date" value="${w.date}"></div></div>
   <div class="field"><label for="ewNote">备注</label><input id="ewNote" value="${esc(w.note||'')}"></div>
   <button class="btn" style="width:100%;justify-content:center" data-act="saveWk" data-id="${w.id}">保存</button>`}
-function budgetSheet(){const m=ym(today());const h0=sorted((S.settings.budgets||[]).filter(b=>b.from<=m),b=>b.from,true)[0];const hist=sorted(S.settings.budgets||[],b=>b.from,true);
-  return sheetHead('每月预算')+`<div class="small muted" style="margin-bottom:10px">设一次，之后每个月沿用。改了从你选的月份开始生效，之前月份不受影响。</div>
-  <div class="frow"><div class="field"><label for="bgAmt">每月预算</label><input id="bgAmt" type="number" inputmode="numeric" value="${h0?h0.amount:''}" placeholder="5000"></div><div class="field"><label for="bgCur">币种</label>${curSel('bgCur',h0?.cur||mainCur())}</div></div>
-  <div class="field"><label for="bgFrom">从哪个月开始</label><input id="bgFrom" type="month" value="${m}"></div>
-  <button class="btn" style="width:100%;justify-content:center" data-act="saveBudget">保存</button>
-  ${hist.length?`<hr class="sp"><div class="small muted" style="margin-bottom:6px">历史</div>${hist.map(b=>`<div class="row"><div class="grow">${b.from.replace('-','年')}月起</div><div class="amt">${money(b.amount,b.cur||'CNY',0)}</div><button class="iconbtn" data-act="delBudget" data-f="${b.from}" aria-label="删除">${icon('close')}</button></div>`).join('')}`:''}`}
+function budgetSheet(){const m=ym(today());
+  const block=(key,kind,title,desc,ids)=>{const list=S.settings[key]||[];const h0=sorted(list.filter(b=>b.from<=m),b=>b.from,true)[0];const hist=sorted(list,b=>b.from,true);
+    return `<div class="panel" style="margin-bottom:12px" id="bg-${kind}"><div style="font-weight:500">${title}</div><div class="tiny muted" style="margin:2px 0 10px">${desc}</div>
+    <div class="frow"><div class="field"><label for="${ids}Amt">每月金额</label><input id="${ids}Amt" type="number" inputmode="numeric" value="${h0?h0.amount:''}" placeholder="${kind==='total'?'5000':'2000'}"></div><div class="field"><label for="${ids}Cur">币种</label>${curSel(ids+'Cur',h0?.cur||mainCur())}</div></div>
+    <div class="field"><label for="${ids}From">从哪个月开始</label><input id="${ids}From" type="month" value="${m}"></div>
+    <button class="btn" style="width:100%;justify-content:center" data-act="saveBudget" data-k="${kind}">保存${title}</button>
+    ${hist.length?`<div class="small muted" style="margin:12px 0 6px">历史</div>${hist.map(b=>`<div class="row"><div class="grow">${b.from.replace('-','年')}月起</div><div class="amt">${money(b.amount,b.cur||'CNY',0)}</div><button class="iconbtn" data-act="delBudget" data-k="${kind}" data-f="${b.from}" aria-label="删除">${icon('close')}</button></div>`).join('')}`:''}</div>`};
+  return sheetHead('每月预算')+`<div class="small muted" style="margin-bottom:10px">两个预算分开设置，都是设一次每月沿用。改了从你选的月份开始生效，之前月份不受影响。</div>`+
+    block('budgets','total','总预算','账单 + 支出一共能花多少','bg')+
+    block('expBudgets','exp','可支配支出预算','不算账单，只算日常支出能花多少','eb')}
 function goalSheet(){return sheetHead('目标体重')+`<div class="field"><label for="goalVal">目标（斤）</label><input id="goalVal" type="number" step="0.5" inputmode="decimal" value="${S.settings.goalWeight??''}"></div><button class="btn" style="width:100%;justify-content:center" data-act="saveGoal">保存</button>`}
 function settingsSheet(){const s=S.settings;const rates=s.rates||{};
   return sheetHead('设置')+
@@ -981,7 +1015,7 @@ const A={
   qWk:()=>{closeSheet();UI.tab='fit';UI.fitSeg='workout';render();setTimeout(()=>document.getElementById('wkMin')?.focus(),50)},
   search:()=>{openSheet(searchSheet);setTimeout(()=>document.getElementById('searchQ')?.focus(),30)},
   settings:()=>openSheet(settingsSheet),
-  budget:()=>openSheet(budgetSheet),
+  budget:d=>{openSheet(budgetSheet);if(d&&d.k==='exp')setTimeout(()=>document.getElementById('bg-exp')?.scrollIntoView({block:'start'}),30)},
   goal:()=>openSheet(goalSheet),
   inbox:()=>{openSheet(inboxSheet);setTimeout(()=>document.getElementById('inboxQuick')?.focus(),30)},
   review:()=>openSheet(reviewSheet),
@@ -991,9 +1025,10 @@ const A={
   setTheme:d=>{if(d.v)document.documentElement.setAttribute('data-theme',d.v);else document.documentElement.removeAttribute('data-theme');safe(()=>saveSettings({theme:d.v}))},
   saveSettings:()=>{const rates={...(S.settings.rates||{})};['AUD','USD','EUR','HKD'].forEach(c=>{const v=parseFloat(val('rate-'+c));if(v>0)rates[c]=v;else delete rates[c]});
     safe(()=>saveSettings({currency:val('setCur')||'CNY',alertDays:Math.max(1,Math.min(30,parseInt(val('setAlert'))||6)),rates}),'已保存');closeSheet()},
-  saveBudget:()=>{const a=parseFloat(val('bgAmt'));const f=val('bgFrom')||ym(today());const bc=val('bgCur')||mainCur();if(!(a>0)){toast('输入一个大于 0 的预算');return}
-    const b=(S.settings.budgets||[]).filter(x=>x.from!==f);b.push({from:f,amount:a,cur:bc});safe(()=>saveSettings({budgets:b}),'预算已更新');closeSheet()},
-  delBudget:d=>safe(()=>saveSettings({budgets:(S.settings.budgets||[]).filter(x=>x.from!==d.f)})),
+  saveBudget:d=>{const exp=d.k==='exp';const ids=exp?'eb':'bg';const key=exp?'expBudgets':'budgets';
+    const a=parseFloat(val(ids+'Amt'));const f=val(ids+'From')||ym(today());const bc=val(ids+'Cur')||mainCur();if(!(a>0)){toast('输入一个大于 0 的金额');return}
+    const b=(S.settings[key]||[]).filter(x=>x.from!==f);b.push({from:f,amount:a,cur:bc});safe(()=>saveSettings({[key]:b}),exp?'可支配支出预算已更新':'总预算已更新');closeSheet()},
+  delBudget:d=>{const key=d.k==='exp'?'expBudgets':'budgets';safe(()=>saveSettings({[key]:(S.settings[key]||[]).filter(x=>x.from!==d.f)}))},
   saveGoal:()=>{const v=parseFloat(val('goalVal'));safe(()=>saveSettings({goalWeight:v>0?v:null}),'已保存');closeSheet()},
   exportData:async()=>{const o={app:'记录记录',version:1,exported:new Date().toISOString(),...snapshotState()};
     const name=`记录记录备份-${today()}.json`;const blob=new Blob([JSON.stringify(o)],{type:'application/json'});
@@ -1011,7 +1046,7 @@ const A={
   runPaste:async()=>{const t=val('pasteText');const err=document.getElementById('pasteErr');if(!t){err.textContent='先粘贴账单文字';return}
     const btn=document.getElementById('pasteBtn');btn.disabled=true;btn.textContent='识别中…';
     try{const r=await aiBill(t);let co=S.companies.find(c=>r.company&&(c.name.includes(r.company)||r.company.includes(c.name)));
-      openSheet(billSheet({},{type:BILL_TYPES.some(b=>b.k===r.type)?r.type:'其他',companyId:co?co.id:(r.company?'__new':''),companyName:co?'':r.company||'',amount:r.amount??'',currency:CURS[r.currency]?r.currency:mainCur(),dueDate:/^\d{4}-\d\d-\d\d$/.test(r.dueDate||'')?r.dueDate:today(),usage:r.usage??'',method:METHODS.includes(r.method)?r.method:''}));
+      openSheet(billSheet({},{type:BILL_TYPES.some(b=>b.k===r.type)?r.type:'其他',companyId:co?co.id:(r.company?'__new':''),companyName:co?'':r.company||'',amount:r.amount??'',currency:CURS[r.currency]?r.currency:mainCur(),ai:true,start:/^\d{4}-\d\d-\d\d$/.test(r.start||'')?r.start:undefined,end:/^\d{4}-\d\d-\d\d$/.test(r.end||'')?r.end:undefined,usage:r.usage??'',method:METHODS.includes(r.method)?r.method:''}));
       if(!co&&r.company){const s=document.getElementById('bCo');if(s)s.value='__new'}}
     catch(e){btn.disabled=false;btn.innerHTML=icon('auto_awesome','style="font-size:18px"')+'识别';
       err.textContent=e.code==='off'||aiOff(e)?'AI 现在用不了，请手动记账单':e.code==='rate_limited'?'AI 用得太频繁了，稍后再试':'没识别出来，换一段文字或手动填'}},
@@ -1019,14 +1054,19 @@ const A={
     const amt=parseFloat(val('bAmt'));if(isNaN(amt)){toast('填一下金额');return}
     let coId=val('bCo');const type=val('bType');
     if(coId==='__new'){const name=val('bCoNew');if(name){coId=uid();await safe(()=>put('companies',coId,{name,type,phone:'',website:'',howToPay:'',account:''}))}else coId=''}
-    const data={type,companyId:coId,amount:amt,currency:val('bCur'),dueDate:val('bDue'),method:val('bMethod'),usage:val('bUsage')?parseFloat(val('bUsage')):null,paid:val('bPaid')==='1',note:val('bNote')};
-    if(d.id){const old=S.bills.find(x=>x.id===d.id)||{};await safe(()=>put('bills',d.id,{...old,...data,id:undefined}),'已保存')}
+    const start=val('bStart'),end=val('bEnd');if(!end){toast('填一下结束日期');return}if(start&&start>end){toast('起始日期不能晚于结束日期');return}
+    const paid=val('bPaid')==='1';const old=d.id?(S.bills.find(x=>x.id===d.id)||{}):{};
+    const data={type,companyId:coId,amount:amt,currency:val('bCur'),start,end,dueDate:undefined,method:val('bMethod'),usage:val('bUsage')?parseFloat(val('bUsage')):null,paid,paidDate:paid?(old.paidDate||today()):null,note:val('bNote')};
+    if(d.id){await safe(()=>put('bills',d.id,{...old,...data,id:undefined}),'已保存')}
     else{const rec=document.getElementById('bRec')?.checked;let rid=null;
-      if(rec){rid=uid();await safe(()=>put('recurring',rid,{type,companyId:coId,amount:amt,currency:data.currency,day:+data.dueDate.slice(8),method:data.method,from:ym(data.dueDate)}))}
-      const id=rid&&ym(data.dueDate)===ym(today())?`r-${rid}-${ym(data.dueDate)}`:uid();
+      if(rec){rid=uid();await safe(()=>put('recurring',rid,{type,companyId:coId,amount:amt,currency:data.currency,method:data.method,from:ym(end)}))}
+      const id=rid&&ym(end)===ym(today())?`r-${rid}-${ym(end)}`:uid();
       await safe(()=>put('bills',id,{...data,recurringId:rid}),'已记下')}
     closeSheet()},
-  billFromCo:d=>{const c=company(d.id);if(!c)return;const last=coBills(c)[0];openSheet(billSheet({},{type:c.type,companyId:c.id,dueDate:d.d,amount:last?last.amount:'',currency:last?.currency||mainCur(),method:last?.method||''}))},
+  billFromCo:d=>{const c=company(d.id);if(!c)return;const last=coBills(c)[0];let per={};
+    if(last&&last.start&&last.end){const len=daysBetween(last.start,last.end);const st=addDays(last.end,1);per={start:st,end:addDays(st,len)}}
+    else if(last&&bdate(last)){const st=addDays(bdate(last),1);per={start:st,end:addDays(addMonths(ym(st),Number(c.cycle)||1)+'-01',-1)}}
+    openSheet(billSheet({},{type:c.type,companyId:c.id,...per,amount:last?last.amount:'',currency:last?.currency||mainCur(),method:last?.method||''}))},
   payBill:d=>safe(()=>patch('bills',d.id,{paid:true,paidDate:today()}),'已标记为已缴'),
   delBill:d=>{if(UI.confirm!==d.id){UI.confirm=d.id;toast('再点一次删除');setTimeout(()=>UI.confirm=null,2500);return}safe(()=>remove('bills',d.id),'已删除');closeSheet()},
   delRecurring:d=>{if(UI.confirm!==d.id){UI.confirm=d.id;toast('再点一次停止每月自动生成');setTimeout(()=>UI.confirm=null,2500);return}safe(()=>remove('recurring',d.id),'已停止')},
@@ -1080,7 +1120,7 @@ const A={
   aiSummary:async()=>{const out=document.getElementById('sumOut');const m=UI.moneyMonth;
     if(!sample){out.textContent='AI 现在用不了。上面的图表已经包含了本月的分类和趋势。';return}
     const mf=moneyFor(m);const ct=catTotals(m);const pt=catTotals(addMonths(m,-1));const bt={};monthBills(m).forEach(b=>bt[b.type]=(bt[b.type]||0)+conv(b.amount,b.currency));
-    const data={月份:m,货币:dispCur(),预算:mf.budget,固定账单合计:Math.round(mf.bills),日常支出合计:Math.round(mf.exp),剩余:mf.left==null?null:Math.round(mf.left),账单按类型:bt,本月日常分类:ct,本月二级分类:subTotals(m),上月日常分类:pt,上月合计:Math.round(sumConv(monthBills(addMonths(m,-1)))+sumConv(monthExp(addMonths(m,-1))))};
+    const data={月份:m,货币:dispCur(),总预算:mf.budget,总预算剩余:mf.left==null?null:Math.round(mf.left),可支配支出预算:mf.expBudget,可支配剩余:mf.expLeft==null?null:Math.round(mf.expLeft),账单合计:Math.round(mf.bills),支出合计:Math.round(mf.exp),账单按类型:bt,本月日常分类:ct,本月二级分类:subTotals(m),上月日常分类:pt,上月合计:Math.round(sumConv(monthBills(addMonths(m,-1)))+sumConv(monthExp(addMonths(m,-1))))};
     out.textContent='正在写…';
     try{const {text}=await sample(`你是一个说话直接的记账助手。根据下面这个月的数据，用中文写 3 句话的月度总结：第一句说总花销和预算情况，第二句指出变化最大的分类（和上月比，给出金额），第三句给一条具体、可执行的建议。不要用标题、列表或表情符号。\n\n${JSON.stringify(data)}`,{onText:({text})=>{out.textContent=text}});
       const sums={...(S.settings.summaries||{})};sums[m]=text;await safe(()=>saveSettings({summaries:sums}))}
