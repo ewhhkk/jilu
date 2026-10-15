@@ -202,6 +202,7 @@ const S = {settings:{}, loaded:new Set()};
 COLS.forEach(c => S[c] = []);
 const UI = {tab:'home', calMonth:ym(today()), selDay:today(), moneySeg:'overview', moneyMonth:ym(today()),
   billFilter:'', openCat:{}, entryCur:null, shopSeg:'todo', projView:'list', openProj:null, fitSeg:'workout', expanded:{}, aiMsg:''};
+const APP_VER='2026.10.15';
 let db = null, sample = null, LOCAL = true;
 function compressImage(file,max=720,q=0.72){return new Promise((res,rej)=>{const url=URL.createObjectURL(file);const img=new Image();
   img.onload=()=>{const sc=Math.min(1,max/Math.max(img.width,img.height));const c=document.createElement('canvas');c.width=Math.round(img.width*sc);c.height=Math.round(img.height*sc);
@@ -285,17 +286,19 @@ function persistLocal(){clearTimeout(persistT);persistT=setTimeout(async()=>{con
   try{if(IDB.db)await IDB.set('state',o);else localStorage.setItem('jilu',JSON.stringify(o))}
   catch(e){if(!storeWarned){storeWarned=true;toast('手机存储空间不够，数据可能没保存上。先导出一份备份')}}},150)}
 window.addEventListener('pagehide',()=>{if(persistT){clearTimeout(persistT);const o=snapshotState();try{IDB.db?IDB.set('state',o):localStorage.setItem('jilu',JSON.stringify(o))}catch(e){}}});
+const SHARED=['bills','companies','recurring'];
 async function put(col,id,data){
   data={...data};delete data.id;Object.keys(data).forEach(k=>data[k]===undefined&&delete data[k]);
+  if(SHARED.includes(col))data.updated=Date.now();
   if(LOCAL){const i=S[col].findIndex(x=>x.id===id);const row={...data,id};if(i>=0)S[col][i]=row;else S[col].push(row);persistLocal();render();return}
   await db.collection(col).doc(id).set(data);
 }
 async function patch(col,id,p){
-  if(LOCAL){const r=S[col].find(x=>x.id===id);if(r)Object.assign(r,p);persistLocal();render();return}
+  if(LOCAL){const r=S[col].find(x=>x.id===id);if(r){Object.assign(r,p);if(SHARED.includes(col))r.updated=Date.now()}persistLocal();render();return}
   await db.collection(col).doc(id).update(p);
 }
 async function remove(col,id){
-  if(LOCAL){S[col]=S[col].filter(x=>x.id!==id);persistLocal();render();return}
+  if(LOCAL){S[col]=S[col].filter(x=>x.id!==id);if(SHARED.includes(col)){const t={...(S.settings.tomb||{})},cut=Date.now()-200*864e5;Object.keys(t).forEach(k=>t[k]<cut&&delete t[k]);t[id]=Date.now();S.settings.tomb=t}persistLocal();render();return}
   await db.collection(col).doc(id).delete();
 }
 async function saveSettings(p){
@@ -617,7 +620,7 @@ function ruleSummary(m){
   return out}
 function yearTotal(y){return sumConv(yearBills(y))+sumConv(yearExp(y))}
 function moneyBills(){
-  let h=`<div style="display:flex;gap:8px;margin-top:12px"><button class="btn" data-act="newBill">${icon('add','style="font-size:18px"')}记账单</button></div>`;
+  let h=`<div style="display:flex;gap:8px;margin-top:12px"><button class="btn" data-act="newBill">${icon('add','style="font-size:18px"')}记账单</button><button class="btn ghost" data-act="shareBills">${icon('upload','style="font-size:18px"')}共享账单</button></div>`;
   h+=`<div class="pills" style="margin-top:12px"><button class="pill ${!UI.billFilter?'on':''}" data-act="billFilter" data-k="">按月</button>${BILL_TYPES.filter(t=>t.k!=='其他'||S.bills.some(b=>b.type==='其他')).map(t=>`<button class="pill ${UI.billFilter===t.k?'on':''}" data-act="billFilter" data-k="${t.k}">${t.k}</button>`).join('')}</div>`;
   if(!UI.billFilter){
     const m=UI.moneyMonth;h+=monthNav(m,'moneyMonth');
@@ -886,6 +889,28 @@ function importSheet(){
   <hr class="sp"><div class="small muted" style="margin-bottom:6px">还没在豆包里设置？复制这段指令，发给豆包作为对话的第一条消息。分类表会跟着你在这里的设置更新。</div>
   <button class="btn ghost" data-act="copyPrompt" style="width:100%;justify-content:center">复制豆包指令</button>
   <textarea id="promptBox" readonly hidden style="width:100%;min-height:120px;margin-top:8px;font-size:12px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px">${esc(doubaoPrompt())}</textarea>`}
+/* merge another phone's bills into target {bills,companies,recurring,tomb}; newest edit wins, deletions travel as tombstones */
+function mergeShared(o,T){const st={bills:{add:0,upd:0,del:0},companies:{add:0,upd:0,del:0},recurring:{add:0,upd:0,del:0}};
+  SHARED.forEach(col=>{(Array.isArray(o[col])?o[col]:[]).forEach(r=>{if(!r||!r.id)return;if(T.tomb[r.id]&&T.tomb[r.id]>=(r.updated||0))return;
+    const i=T[col].findIndex(x=>x.id===r.id);
+    if(i<0){T[col].push({...r});st[col].add++}else if((r.updated||0)>(T[col][i].updated||0)){T[col][i]={...r};st[col].upd++}})});
+  Object.entries(o.tomb||{}).forEach(([id,ts])=>{SHARED.forEach(col=>{const i=T[col].findIndex(x=>x.id===id);if(i>=0&&ts>(T[col][i].updated||0)){T[col].splice(i,1);st[col].del++}});if(!(T.tomb[id]>=ts))T.tomb[id]=ts});
+  return st}
+function sharedTarget(clone){const t={tomb:{...(S.settings.tomb||{})}};SHARED.forEach(c=>t[c]=clone?S[c].map(x=>({...x})):S[c]);return t}
+function openBillImport(o){UI.pendingBills=o;const st=mergeShared(o,sharedTarget(true));const b=st.bills,c=st.companies;
+  const none=!b.add&&!b.upd&&!b.del&&!c.add&&!c.upd&&!c.del&&!st.recurring.add&&!st.recurring.upd&&!st.recurring.del;
+  openSheet(()=>sheetHead('导入对方的账单')+`<div class="small muted" style="margin-bottom:10px">${o.exported?`对方在 ${fmtD(o.exported.slice(0,10))} 导出`:''}。只合并账单、公司档案和每月固定账单，你的支出、购物、项目、健身都不会变。</div>
+  ${none?empty('check','你们的账单已经一样了，不用导入'):`<div class="panel" style="margin-bottom:12px"><div class="small">账单：新增 <b>${b.add}</b> 笔 · 更新 <b>${b.upd}</b> 笔 · 删除 <b>${b.del}</b> 笔</div>${c.add||c.upd||c.del?`<div class="small" style="margin-top:4px">公司档案：新增 ${c.add} · 更新 ${c.upd} · 删除 ${c.del}</div>`:''}<div class="tiny muted" style="margin-top:6px">同一笔账单两边都改过的，以最后改的那次为准。</div></div>
+  <button class="btn" data-act="confirmBillImport" style="width:100%;justify-content:center">合并</button>`}`)}
+async function shareFile(name,obj){const blob=new Blob([JSON.stringify(obj)],{type:'application/json'});
+  try{const file=new File([blob],name,{type:'application/json'});if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:name});return true}}
+  catch(e){if(e&&e.name==='AbortError')return false}
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);return true}
+function shareSheet(){const s=S.settings;return sheetHead('共享账单')+`<div class="small muted" style="margin-bottom:12px">和另一部手机互传账单：你发一个文件给对方，对方导入就会合并进他的圆子。只传账单、公司档案和每月固定账单，其他内容不会传过去。</div>
+  <div class="panel" style="margin-bottom:10px"><div style="font-weight:500">${icon('upload','style="font-size:18px"')} 发给对方</div><div class="tiny muted" style="margin:4px 0 10px">生成文件后选微信发给对方。${s.lastBillShare?`上次发送：${fmtD(s.lastBillShare)}`:''}</div>
+  <button class="btn" data-act="exportBills" style="width:100%;justify-content:center">导出账单文件</button></div>
+  <div class="panel"><div style="font-weight:500">${icon('download','style="font-size:18px"')} 导入对方的账单</div><div class="tiny muted" style="margin:4px 0 10px">在微信里打开对方发来的文件 → 右上角"…" → 用其他应用打开 → 存储到"文件"。然后点下面的按钮选这个文件。${s.lastBillImport?`上次导入：${fmtD(s.lastBillImport)}`:''}</div>
+  <button class="btn ghost" data-act="importBills" style="width:100%;justify-content:center">选择文件导入</button><input type="file" id="billFile" accept="application/json,.json" hidden></div>`}
 function catSheet(){const cs=CATS();
   return sheetHead('支出分类')+`<div class="small muted" style="margin-bottom:6px">一级分类是图表里的大类，二级分类用来细分。删掉分类不会删掉已经记的支出。</div>`+
   cs.map((c,i)=>`<div class="panel" style="margin-top:8px"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-weight:500">${esc(c.k)}</span><button class="iconbtn" data-act="delTop" data-i="${i}" aria-label="删除${esc(c.k)}">${icon('delete')}</button></div>
@@ -951,7 +976,8 @@ function settingsSheet(){const s=S.settings;const rates=s.rates||{};
   <div class="tiny muted" style="margin-bottom:8px">数据只存在这台手机里。建议每两周导出一次，存到"文件"或 iCloud；换手机或出问题时用"导入备份"恢复。${s.lastBackup?`上次备份：${fmtD(s.lastBackup)}`:'还没有备份过'}</div>
   <div class="grid2"><button class="btn ghost" data-act="exportData" style="justify-content:center">${icon('download','style="font-size:18px"')}导出备份</button><button class="btn ghost" data-act="importData" style="justify-content:center">${icon('upload','style="font-size:18px"')}导入备份</button></div>
   <input type="file" id="importFile" accept="application/json,.json" hidden>
-  <div class="tiny muted" style="margin-top:14px;text-align:center">离线版 · 不联网也能用 · 不使用 AI</div>`}
+  <button class="btn ghost" data-act="checkUpdate" style="width:100%;justify-content:center;margin-top:14px">${icon('refresh','style="font-size:18px"')}检查更新</button>
+  <div class="tiny muted" style="margin-top:8px;text-align:center">离线版 ${APP_VER} · 不联网也能用 · 不使用 AI</div>`}
 function inboxSheet(){const list=sorted(S.inbox,x=>x.created,true);
   return sheetHead('随手记 · INBOX')+`<div class="small muted" style="margin-bottom:8px">想到什么先丢进来，之后再变成任务、购物或支出。</div>
   <div class="quick"><input id="inboxQuick" placeholder="想到什么写什么" aria-label="随手记"><button class="btn" data-act="addInbox">记下</button></div>
@@ -1039,6 +1065,19 @@ const A={
     if(ok){S.settings.lastBackup=today();persistLocal();render();toast('备份已导出，存到"文件"或 iCloud 里')}},
   importData:()=>document.getElementById('importFile')?.click(),
   confirmImport:()=>{const o=UI.pendingImport;if(!o)return;applyState(o);S.settings.lastBackup=o.settings?.lastBackup||today();UI.pendingImport=null;persistLocal();applyLook();closeSheet();render();toast('已恢复备份')},
+  shareBills:()=>openSheet(shareSheet),
+  exportBills:async()=>{const o={app:'记录记录',kind:'bills',version:1,exported:new Date().toISOString(),bills:S.bills,companies:S.companies,recurring:S.recurring,tomb:S.settings.tomb||{}};
+    if(await shareFile(`记录记录账单-${today()}.json`,o)){S.settings.lastBillShare=today();persistLocal();toast('账单文件已导出，发给对方吧')}},
+  importBills:()=>document.getElementById('billFile')?.click(),
+  confirmBillImport:()=>{const o=UI.pendingBills;if(!o)return;const T=sharedTarget(false);const st=mergeShared(o,T);S.settings.tomb=T.tomb;S.settings.lastBillImport=today();UI.pendingBills=null;
+    persistLocal();closeSheet();render();toast(`已合并：新增 ${st.bills.add} 笔，更新 ${st.bills.upd} 笔`)},
+  checkUpdate:async()=>{toast('正在检查更新…');
+    try{const ctl=new AbortController();const tm=setTimeout(()=>ctl.abort(),8000);const r=await fetch('./index.html',{cache:'no-store',signal:ctl.signal});clearTimeout(tm);if(!r.ok)throw 0;
+      const t=await r.text();const m=t.match(/const APP_VER='([^']+)'/);
+      if(window.caches){for(const k of await caches.keys()){if(!k.startsWith('jilu'))continue;const c=await caches.open(k);const h={headers:{'Content-Type':'text/html; charset=utf-8'}};await c.put('./index.html',new Response(t,h));await c.put('./',new Response(t,h))}}
+      try{const reg=await navigator.serviceWorker?.getRegistration();reg&&reg.update()}catch(_){}
+      if(m&&m[1]!==APP_VER){toast('找到新版本，正在更新');setTimeout(()=>location.reload(),900)}else toast('已经是最新版 '+APP_VER)}
+    catch(e){toast('连不上更新服务器，打开 VPN 后再试')}},
   /* bills */
   newBill:()=>openSheet(billSheet({})),
   editBill:d=>{const b=S.bills.find(x=>x.id===d.id);if(b)openSheet(billSheet(b))},
@@ -1226,9 +1265,12 @@ document.addEventListener('change',e=>{
   if(id==='bType'){const c=S.companies.find(c=>c.type===e.target.value);const s=document.getElementById('bCo');if(c&&s&&!s.value)s.value=c.id}
   if(id==='shopFile'){const f=e.target.files&&e.target.files[0];if(f){if(f.size>20e6){toast('照片太大了，换一张小于 20MB 的');return}UI.pendingPhoto=f;render()}}
   if(id==='importFile'){const f=e.target.files&&e.target.files[0];if(!f)return;f.text().then(t=>{let o;try{o=JSON.parse(t)}catch(_){toast('这个文件不是记录记录的备份');return}
+    if(o&&o.kind==='bills'){openBillImport(o);return}
     if(!o||!COLS.some(c=>Array.isArray(o[c]))){toast('这个文件不是记录记录的备份');return}
     UI.pendingImport=o;const n=COLS.reduce((s,c)=>s+(o[c]||[]).length,0);
     openSheet(()=>sheetHead('导入备份')+`<div class="small" style="margin-bottom:12px">备份里有 ${n} 条记录${o.exported?`，导出于 ${fmtD(o.exported.slice(0,10))}`:''}。导入会<b>替换</b>手机上现在的全部数据。</div><button class="btn danger" data-act="confirmImport" style="width:100%;justify-content:center">替换并恢复</button>`)});e.target.value='';return}
+  if(id==='billFile'){const f=e.target.files&&e.target.files[0];if(!f)return;f.text().then(t=>{let o;try{o=JSON.parse(t)}catch(_){o=null}
+    if(!o||!Array.isArray(o.bills)){toast('这个文件不是记录记录的账单文件');return}openBillImport(o)});e.target.value='';return}
   if(id==='itFile'){const f=e.target.files&&e.target.files[0];const btn=document.querySelector('[data-act="itPhoto"]');if(!f||!btn)return;const itId=btn.dataset.id;
     btn.disabled=true;btn.textContent='上传中…';assets.upload(f).then(r=>{const it=S.shop.find(x=>x.id===itId);const old=it?.photo;return patch('shop',itId,{photo:r.id}).then(()=>{if(old)assets.delete(old).catch(()=>{});toast('照片已更新');closeSheet()})}).catch(()=>{toast('照片没传上去，再试一次');btn.disabled=false})}
 });
